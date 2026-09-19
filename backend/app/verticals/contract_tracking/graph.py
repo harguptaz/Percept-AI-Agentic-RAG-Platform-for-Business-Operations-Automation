@@ -49,7 +49,11 @@ from app.verticals.contract_tracking.tools import get_surrounding_clauses, searc
 # Section 12.2: tunable without a code change.
 # ACTION_THRESHOLD gates create_calendar_reminder vs flag_for_manual_review
 # (Section 8.3, Agentic Decision Points).
-ACTION_THRESHOLD = float(os.getenv("CONTRACT_TRACKING_ACTION_THRESHOLD", "0.75"))
+# Default raised from 0.75 to 0.85 based on threshold experiment results
+# (Section 12.2 tuning): real LLM confidence clusters at 0.85-0.98 for
+# well-defined obligations; 0.75 was too permissive, auto-actioning
+# ambiguous clauses like "reasonable advance notice" with no concrete date.
+ACTION_THRESHOLD = float(os.getenv("CONTRACT_TRACKING_ACTION_THRESHOLD", "0.85"))
 # PRECEDENT_CHECK_THRESHOLD is the code-gated floor that triggers
 # search_similar_contracts even when the LLM itself didn't flag the
 # clause as unusual_wording (see graph.py's module-level design
@@ -76,6 +80,26 @@ non-standard, or hard to interpret with confidence>,
 If has_obligation is false, the other fields may be empty/default but must \
 still be present. Only set references_other_section if the clause explicitly \
 points to another numbered section (e.g. "as defined in Section 4.2")."""
+
+
+def _classify_error(exc: Exception) -> str:
+    """
+    Converts a raw exception into a short, human-readable category
+    string safe to display in the escalations UI. Raw exception
+    messages are never surfaced directly — they can contain sensitive
+    API details (org IDs, billing URLs, token counts) that are not
+    useful to a human reviewer and should not appear in the UI.
+    """
+    msg = str(exc).lower()
+    if "429" in msg or "rate_limit" in msg or "rate limit" in msg:
+        return "LLM service temporarily unavailable (rate limit)"
+    if "401" in msg or "403" in msg or "auth" in msg or "api_key" in msg:
+        return "LLM service authentication error"
+    if "timeout" in msg or "timed out" in msg:
+        return "LLM service timed out"
+    if "connection" in msg or "network" in msg:
+        return "LLM service unreachable"
+    return "Unexpected error during clause extraction"
 
 
 def _extract_clause(clause_text: str, extra_context: str | None = None) -> dict:
@@ -322,7 +346,10 @@ def run_contract_tracking_vertical(agent_input: AgentRunInput) -> AgentRunOutput
             partial_failure = {
                 "failed_clause_number": clause["clause_number"],
                 "unprocessed_clause_numbers": unprocessed,
+                # Raw error kept for log_decision debugging only —
+                # never surfaced in the human-facing escalation reason.
                 "error": str(e),
+                "error_category": _classify_error(e),
             }
             log_decision(run_id, "escalation", {
                 "reason": "processing_failed_partway_through_contract",
@@ -348,7 +375,7 @@ def run_contract_tracking_vertical(agent_input: AgentRunInput) -> AgentRunOutput
     if partial_failure:
         reason = (
             f"Processing failed at clause {partial_failure['failed_clause_number']} "
-            f"({partial_failure['error']}). Clause(s) "
+            f"({partial_failure['error_category']}). Clause(s) "
             f"{', '.join(partial_failure['unprocessed_clause_numbers'])} were never "
             f"processed and need manual review. Obligations already found in this "
             f"contract before the failure were still acted on normally."
