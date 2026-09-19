@@ -436,5 +436,7 @@ def test_mid_contract_failure_closes_out_run_as_escalated_not_stuck_running(monk
     # status='running'.
     assert run_row["status"] == "escalated"
     assert escalation_row is not None
-    assert "429" in escalation_row["reason"] or "rate_limit" in escalation_row["reason"]
+    # Error message is now sanitized via _classify_error() — raw API
+    # details (org IDs, billing URLs) are never stored in escalation reason.
+    assert "rate limit" in escalation_row["reason"].lower() or "temporarily unavailable" in escalation_row["reason"].lower()
 
