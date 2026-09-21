@@ -1,6 +1,12 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft } from "lucide-react";
 import { getAgentRun } from "../api/agentRuns";
+import { getVerticalLabel } from "../utils/verticals";
+import { formatRunMeta } from "../utils/formatDate";
+import { formatConfidence, describeRetrievalScore } from "../utils/formatScore";
+import { prettifySnakeCase, tryParseJsonObject } from "../utils/formatDecision";
+import { DecisionBulletList } from "../components/DecisionBullets";
 
 function ConfidenceBadge({ confidence }: { confidence: number | null }) {
   if (confidence === null) return <span className="text-slate-400">—</span>;
@@ -12,7 +18,7 @@ function ConfidenceBadge({ confidence }: { confidence: number | null }) {
 
   return (
     <span className={`px-2 py-1 rounded text-sm font-medium ${color}`}>
-      {(confidence * 100).toFixed(0)}%
+      {formatConfidence(confidence)}
     </span>
   );
 }
@@ -68,7 +74,7 @@ function RunDetail() {
   });
 
   if (isLoading) return <p>Loading run details...</p>;
-  if (error) return <p className="text-red-600">Error: {(error as Error).message}</p>;
+  if (error) return <p className="text-red-600">Something went wrong loading this run. ({(error as Error).message})</p>;
   if (!run) return null;
 
   const retrievalStep = run.decisions.find((d) => d.step_type === "retrieval");
@@ -77,17 +83,21 @@ function RunDetail() {
   const escalationStep = run.decisions.find((d) => d.step_type === "escalation");
 
   return (
-    <div className="max-w-3xl">
-      <Link to="/" className="text-blue-600 hover:underline text-sm">← Back to Dashboard</Link>
+    <div className="max-w-3xl mx-auto">
+      <Link
+        to="/"
+        className="inline-flex items-center gap-1.5 text-sm text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-lg px-3 py-1.5 shadow-sm hover:shadow transition-all mb-4"
+      >
+        <ArrowLeft size={14} />
+        Back to Dashboard
+      </Link>
 
       {/* Header */}
-      <div className="bg-white rounded shadow p-6 mt-4 mb-4">
+      <div className="bg-white rounded shadow p-6 mb-4">
         <div className="flex justify-between items-start mb-2">
           <div>
-            <h2 className="text-xl font-semibold">{run.vertical}</h2>
-            <p className="text-sm text-slate-500">
-              {run.trigger_type} · {new Date(run.created_at).toLocaleString()}
-            </p>
+            <h2 className="text-xl font-semibold">{getVerticalLabel(run.vertical)}</h2>
+            <p className="text-sm text-slate-500">{formatRunMeta(run.trigger_type, run.created_at)}</p>
           </div>
           <div className="flex gap-2 items-center">
             <StatusBadge status={run.status} />
@@ -101,25 +111,43 @@ function RunDetail() {
         <div className="bg-white rounded shadow p-6 mb-4">
           <h3 className="font-medium mb-2">Retrieved Context</h3>
           <p className="text-sm text-slate-600">
-            Top score: {(retrievalStep.detail?.top_score as number)?.toFixed(2) ?? "—"} ·{" "}
-            {retrievalStep.detail?.num_results as number} result(s)
+            {describeRetrievalScore(
+              retrievalStep.detail?.top_score as number | null,
+              retrievalStep.detail?.num_results as number | null
+            )}
             {retrievalStep.detail?.retried ? " · retried once" : ""}
           </p>
         </div>
       )}
 
-            {/* Reasoning panel — falls back to rendering the raw detail
-          JSON when a vertical doesn't use the dummy's simple
-          {content: string} shape (e.g. meeting_action_items logs
-          {verdict, confidence} or {extracted_count, items}). */}
+      {/* Reasoning panel. Three possible shapes, checked in order:
+          (1) content is a plain free-text string (dummy vertical) —
+              rendered as prose.
+          (2) content is a STRING that is itself JSON (internal_mobility
+              logs its whole structured ranking result this way,
+              unlike every other vertical) — parsed, then rendered as
+              bullets like any other structured detail.
+          (3) detail itself is already a real nested object
+              ({verdict, confidence}, {extracted_count, items}, etc.)
+              — rendered as bullets directly via formatDecisionDetail,
+              which works for any vertical's shape with no
+              per-vertical code. */}
       {reasoningStep && (
         <div className="bg-white rounded shadow p-6 mb-4">
           <h3 className="font-medium mb-2">LLM Reasoning</h3>
-          <pre className="text-sm text-slate-700 whitespace-pre-wrap bg-slate-50 p-3 rounded">
-            {typeof reasoningStep.detail?.content === "string"
-              ? (reasoningStep.detail.content as string)
-              : JSON.stringify(reasoningStep.detail, null, 2)}
-          </pre>
+          {(() => {
+            const content = reasoningStep.detail?.content;
+            if (typeof content === "string") {
+              const parsed = tryParseJsonObject(content);
+              if (parsed) {
+                return <DecisionBulletList detail={parsed} />;
+              }
+              return (
+                <p className="text-sm text-slate-700 whitespace-pre-wrap">{content}</p>
+              );
+            }
+            return <DecisionBulletList detail={reasoningStep.detail as Record<string, unknown>} />;
+          })()}
         </div>
       )}
 
@@ -127,14 +155,12 @@ function RunDetail() {
       {actionStep && (
         <div className="bg-white rounded shadow p-6 mb-4 border-l-4 border-green-500">
           <h3 className="font-medium mb-2">Action Taken</h3>
-          <p className="text-sm text-slate-700">
-            <span className="font-mono bg-slate-100 px-1 rounded">
-              {actionStep.detail?.action_name as string}
+          <p className="text-sm text-slate-700 mb-2">
+            <span className="font-medium">
+              {prettifySnakeCase(actionStep.detail?.action_name as string | undefined)}
             </span>
           </p>
-          <pre className="text-xs text-slate-500 mt-2">
-            {JSON.stringify(actionStep.detail?.result, null, 2)}
-          </pre>
+          <DecisionBulletList detail={actionStep.detail?.result as Record<string, unknown>} />
         </div>
       )}
 
